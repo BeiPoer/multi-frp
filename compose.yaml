@@ -1,6 +1,6 @@
 services:
   multifrp:
-    build: .
+    image: ghcr.io/beipoer/multi-frp:${MULTIFRP_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       MULTIFRP_HOST: ${MULTIFRP_HOST:?Set MULTIFRP_HOST in .env}

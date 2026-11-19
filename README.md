@@ -10,7 +10,8 @@ MultiFRP 用一台公网服务器管理多台 Windows 设备的 TCP 隧道。服
 4. 在项目目录执行：
 
    ```sh
-   docker compose up -d --build
+   docker compose pull
+   docker compose up -d
    docker compose ps
    ```
 
@@ -18,9 +19,30 @@ MultiFRP 用一台公网服务器管理多台 Windows 设备的 TCP 隧道。服
 
 Docker 卷 `server-data` 保存设备授权、端口分配、后台域名和近 8 天的流量样本，`https-data` 保存 Caddy 证书。常规重建复用原卷。扩充端口范围时保留已有分配所在的端口。
 
+项目使用 `compose.yaml`（Docker Compose 默认识别），服务端直接拉取 `ghcr.io/beipoer/multi-frp:latest`，无需在部署机器上编译。更新时再次执行上面的 `pull` 和 `up -d`。要固定版本，在 `.env` 中设置 `MULTIFRP_IMAGE_TAG=v1.0.0`，对应标签必须已发布。镜像目前支持 Linux x64。
+
+首次发布后，如需免登录拉取，请在 GitHub 仓库关联的 `multi-frp` Package 设置中将可见性改为 Public；若保留私有，则在部署机器上先使用有 `read:packages` 权限的凭据执行 `docker login ghcr.io`。
+
+## GitHub Actions 发布
+
+`.github/workflows/publish.yml` 使用仓库自带的 `GITHUB_TOKEN`，无需配置 Docker Hub 账号或额外发布 Token。仓库需允许 Actions 运行及工作流申请 `packages: write` 和 `contents: write` 权限。
+
+- 推送 `main`：运行 Go 测试，构建并推送 `latest` 和 `sha-<短提交号>` 镜像。
+- 推送 `v*` 标签：测试并发布同名镜像（例如 `v1.0.0`），然后复用 `build-client.ps1` 构建 Windows x64 EXE，创建同名 GitHub Release 并上传 `MultiFRP-windows-amd64.exe`。重跑时更新已有 Release 的同名附件。
+- Actions 页可手动运行 `Publish`。选择 `main` 更新 `latest`；选择已有 `v*` 标签可重新执行该版本发布。标签发布不覆盖 `latest`。
+
+提交并推送代码后，发布版本示例：
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+在仓库的 Actions 页面确认 `Publish` 成功后，从 [Releases](https://github.com/BeiPoer/multi-frp/releases) 下载 EXE。
+
 ## 使用 Windows 客户端
 
-1. 打开 `MultiFRP-windows-amd64.exe`，点击「绑定设备」，输入管理端地址和后台生成的一次性邀请码。首次安装 Windows 后台服务时需要本机管理员批准 UAC。一个邀请码可使用一次，有效期 24 小时。
+1. 从 [Releases](https://github.com/BeiPoer/multi-frp/releases) 下载并打开 `MultiFRP-windows-amd64.exe`，点击「绑定设备」，输入管理端地址和后台生成的一次性邀请码。首次安装 Windows 后台服务时需要本机管理员批准 UAC。一个邀请码可使用一次，有效期 24 小时。
 2. 点击「申请 TCP 隧道」，填写名称、本机地址和本机端口。后台批准后，EXE 会自动同步并尝试上线。实际在线后，可复制公网访问地址。
 3. 勾选「开机自启动（Windows 登录前）」，由 Windows 在电脑开机时启动后台服务。配置和设备凭据随后台服务保存，待网络可用后恢复已批准且启用的隧道。被映射的本机程序也需要在登录前已经监听端口。
 4. 点击窗口右上角的「×」隐藏到右下角托盘，点击托盘图标恢复窗口。右键选择「完全退出」时会停止后台服务并断开本机隧道，保留下次开机的自启动设置。取消勾选自启动会改为手动启动，当前服务会继续运行。
@@ -40,5 +62,5 @@ EXE 首次获准安装时复制到 `%ProgramFiles%\MultiFRP\MultiFRP.exe`。设�
 ## 验收
 
 - 两台设备分别申请并开通隧道。让第一条保持 TCP 长连接传输，确认后台双向带宽和流量在连接关闭前就开始更新。停用第一条，确认其连接断开且第二条仍可访问。
-- 再次执行 `docker compose up -d --build`，确认设备绑定、域名、隧道配置和历史流量仍可查看。
+- 再次执行 `docker compose pull` 和 `docker compose up -d`，确认设备绑定、域名、隧道配置和历史流量仍可查看。
 - 在目标 Windows 上启用自启动后重启，停在密码输入界面。从另一台机器访问由该 Windows 设备映射的、已经启动的本机服务。登录后打开 EXE，确认「×」保留托盘和隧道，「完全退出」断开隧道。
