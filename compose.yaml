@@ -1,0 +1,40 @@
+services:
+  multifrp:
+    build: .
+    restart: unless-stopped
+    environment:
+      MULTIFRP_HOST: ${MULTIFRP_HOST:?Set MULTIFRP_HOST in .env}
+      MULTIFRP_PUBLIC_DOMAIN: ${MULTIFRP_PUBLIC_DOMAIN:-}
+      MULTIFRP_ADMIN_USER: ${MULTIFRP_ADMIN_USER:-admin}
+      MULTIFRP_ADMIN_PASSWORD: ${MULTIFRP_ADMIN_PASSWORD:?Set MULTIFRP_ADMIN_PASSWORD in .env}
+      MULTIFRP_PORT_FIRST: ${MULTIFRP_PORT_FIRST:-30000}
+      MULTIFRP_PORT_LAST: ${MULTIFRP_PORT_LAST:-30099}
+      MULTIFRP_TIMEZONE: ${MULTIFRP_TIMEZONE:-Asia/Shanghai}
+      MULTIFRP_DB: /var/lib/multifrp/multifrp.db
+    ports:
+      - "${MULTIFRP_PORT_FIRST:-30000}-${MULTIFRP_PORT_LAST:-30099}:${MULTIFRP_PORT_FIRST:-30000}-${MULTIFRP_PORT_LAST:-30099}/tcp"
+    volumes:
+      - server-data:/var/lib/multifrp
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  https:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      MULTIFRP_HOST: ${MULTIFRP_HOST:?Set MULTIFRP_HOST in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - https-data:/data
+      - https-config:/config
+
+volumes:
+  server-data:
+  https-data:
+  https-config:

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MultiFRP 管理台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <header class="top"><div class="top-inner"><span class="brand">MultiFRP</span><button id="logout" class="quiet" hidden>退出登录</button></div></header>
+  <main>
+    <section id="login" class="login card" hidden>
+      <h1>登录管理台</h1>
+      <form id="login-form">
+        <label>用户名<input name="user" autocomplete="username" required></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="primary">登录</button>
+      </form>
+    </section>
+    <p id="message" role="status" hidden></p>
+    <div id="dashboard" hidden>
+      <div class="heading"><h1>隧道管理</h1><button id="invite" class="primary">生成邀请码</button></div>
+      <section id="invitation" class="card invitation" hidden>
+        <div><strong>一次性邀请码</strong><p><code id="invite-code"></code></p><small id="invite-expiry"></small></div>
+        <button id="copy-invite">复制</button>
+      </section>
+      <section class="card settings">
+        <form id="domain-form"><label>公网访问域名 <span>客户端显示的 TCP 入口域名</span><input id="domain" name="domain" required></label><button>保存域名</button></form>
+      </section>
+      <section class="card inventory" aria-labelledby="tunnel-heading">
+        <div class="section-head"><h2 id="tunnel-heading">隧道</h2><small id="timezone"></small></div>
+        <div class="table-scroll"><table>
+          <thead><tr><th>隧道 / 设备</th><th>地址</th><th>状态</th><th>当前带宽</th><th>今日流量</th><th>操作</th></tr></thead>
+          <tbody id="tunnels"></tbody>
+        </table></div>
+      </section>
+      <section class="card inventory" aria-labelledby="device-heading">
+        <div class="section-head"><h2 id="device-heading">设备</h2></div>
+        <div class="table-scroll"><table>
+          <thead><tr><th>设备名称</th><th>设备 ID</th><th>授权状态</th><th>操作</th></tr></thead>
+          <tbody id="devices"></tbody>
+        </table></div>
+      </section>
+    </div>
+  </main>
+  <dialog id="detail">
+    <div class="heading"><h2 id="detail-title">隧道流量</h2><form method="dialog"><button aria-label="关闭详情">关闭</button></form></div>
+    <div class="chart-settings"><label>统计范围 <select id="period"><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select></label><small id="detail-total"></small></div>
+    <p class="legend"><span>公网 → 客户端</span><span>客户端 → 公网</span></p>
+    <canvas id="chart" width="740" height="260" aria-label="隧道双向平均带宽曲线"></canvas>
+    <p id="chart-point" aria-live="polite"></p>
+  </dialog>
+</body>
+</html>
