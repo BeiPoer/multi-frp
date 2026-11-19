@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"strconv"
 	"sync"
@@ -19,6 +20,8 @@ type meter struct {
 
 type route struct {
 	id          string
+	listener    net.Listener
+	closed      bool
 	meter       *meter
 	connections map[*connection]context.CancelFunc
 }
@@ -27,43 +30,85 @@ type connection struct{ client net.Conn }
 
 type gateway struct {
 	first, last int
-	listeners   []net.Listener
-	mu          sync.Mutex
-	routes      map[int]*route
-	meters      map[string]*meter
-	workers     sync.WaitGroup
-	closed      bool
+	host        string
+	// Keep assignments across disable/re-enable until old FRP proxies have gone away.
+	privatePorts map[int]int
+	mu           sync.Mutex
+	routes       map[int]*route
+	meters       map[string]*meter
+	workers      sync.WaitGroup
+	closed       bool
 }
 
 const firstPrivatePort = 12000
+const lastPrivatePort = 19999
 
-func newGateway(host string, first, last int) (*gateway, error) {
-	g := &gateway{first: first, last: last, routes: map[int]*route{}, meters: map[string]*meter{}}
-	for port := first; port <= last; port++ {
-		listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
-		if err != nil {
-			g.close()
-			return nil, fmt.Errorf("bind public tunnel port %d: %w", port, err)
-		}
-		g.listeners = append(g.listeners, listener)
-		g.workers.Go(func() { g.accept(listener, port) })
-	}
-	return g, nil
+func newGateway(host string, first, last int) *gateway {
+	return &gateway{first: first, last: last, host: host, privatePorts: map[int]int{}, routes: map[int]*route{}, meters: map[string]*meter{}}
 }
 
-func (g *gateway) privatePort(publicPort int) int { return firstPrivatePort + publicPort - g.first }
+func (g *gateway) privatePort(publicPort int) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.privatePorts[publicPort]
+}
 
-func (g *gateway) reconcile(data state) {
+// Reserve listeners before saving; a failed bind or save must leave existing routes intact.
+func (g *gateway) reconcile(data state, save func() error) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
-		return
+		return fmt.Errorf("gateway is closed")
 	}
+	added := map[int]net.Listener{}
+	defer func() {
+		for _, listener := range added {
+			_ = listener.Close()
+		}
+	}()
+	privatePorts := maps.Clone(g.privatePorts)
+	used := map[int]bool{}
+	for _, port := range privatePorts {
+		used[port] = true
+	}
+	for _, tunnel := range data.Tunnels {
+		if tunnel.State != "approved" || !tunnel.Enabled || data.Devices[tunnel.DeviceID].Revoked || g.routes[tunnel.Port] != nil {
+			continue
+		}
+		listener, err := net.Listen("tcp", net.JoinHostPort(g.host, strconv.Itoa(tunnel.Port)))
+		if err != nil {
+			return failure{409, fmt.Sprintf("公网端口 %d 无法监听，请检查是否已被占用：%v", tunnel.Port, err)}
+		}
+		added[tunnel.Port] = listener
+		if privatePorts[tunnel.Port] == 0 {
+			for port := firstPrivatePort; port <= lastPrivatePort; port++ {
+				if used[port] {
+					continue
+				}
+				probe, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+				if err != nil {
+					continue
+				}
+				_ = probe.Close()
+				privatePorts[tunnel.Port], used[port] = port, true
+				break
+			}
+			if privatePorts[tunnel.Port] == 0 {
+				return failure{409, "内部转发端口已耗尽"}
+			}
+		}
+	}
+	if err := save(); err != nil {
+		return err
+	}
+	g.privatePorts = privatePorts
 	for port, previous := range g.routes {
 		tunnel := data.Tunnels[previous.id]
 		if tunnel.Port == port && tunnel.State == "approved" && tunnel.Enabled && !data.Devices[tunnel.DeviceID].Revoked {
 			continue
 		}
+		previous.closed = true
+		_ = previous.listener.Close()
 		for entry, cancel := range previous.connections {
 			cancel()
 			_ = entry.client.Close()
@@ -77,19 +122,23 @@ func (g *gateway) reconcile(data state) {
 		if g.meters[id] == nil {
 			g.meters[id] = &meter{}
 		}
-		g.routes[tunnel.Port] = &route{id: id, meter: g.meters[id], connections: map[*connection]context.CancelFunc{}}
+		r := &route{id: id, listener: added[tunnel.Port], meter: g.meters[id], connections: map[*connection]context.CancelFunc{}}
+		g.routes[tunnel.Port] = r
+		delete(added, tunnel.Port)
+		privatePort := g.privatePorts[tunnel.Port]
+		g.workers.Go(func() { g.accept(r, privatePort) })
 	}
+	return nil
 }
 
-func (g *gateway) accept(listener net.Listener, port int) {
+func (g *gateway) accept(route *route, privatePort int) {
 	for {
-		client, err := listener.Accept()
+		client, err := route.listener.Accept()
 		if err != nil {
 			return
 		}
 		g.mu.Lock()
-		route := g.routes[port]
-		if g.closed || route == nil || len(route.connections) >= 128 {
+		if g.closed || route.closed || len(route.connections) >= 128 {
 			g.mu.Unlock()
 			_ = client.Close()
 			continue
@@ -105,7 +154,7 @@ func (g *gateway) accept(listener net.Listener, port int) {
 				delete(route.connections, entry)
 				g.mu.Unlock()
 			}()
-			g.forward(ctx, client, port, route.meter)
+			g.forward(ctx, client, privatePort, route.meter)
 		})
 		g.mu.Unlock()
 	}
@@ -124,7 +173,7 @@ func (w countingWriter) Write(p []byte) (int, error) {
 
 func (g *gateway) forward(ctx context.Context, client net.Conn, port int, m *meter) {
 	dialer := net.Dialer{Timeout: 3 * time.Second}
-	upstream, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(g.privatePort(port))))
+	upstream, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
 		return
 	}
@@ -167,10 +216,8 @@ func (g *gateway) close() {
 		return
 	}
 	g.closed = true
-	for _, listener := range g.listeners {
-		_ = listener.Close()
-	}
 	for _, route := range g.routes {
+		_ = route.listener.Close()
 		for entry, cancel := range route.connections {
 			cancel()
 			_ = entry.client.Close()

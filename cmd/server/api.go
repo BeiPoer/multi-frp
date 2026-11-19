@@ -95,11 +95,10 @@ func (a *app) changeLocked(change func(*state) error) error {
 	if err := change(&next); err != nil {
 		return err
 	}
-	if err := saveState(a.db, next); err != nil {
+	if err := a.gateway.reconcile(next, func() error { return saveState(a.db, next) }); err != nil {
 		return err
 	}
 	a.data = next
-	a.gateway.reconcile(next)
 	return nil
 }
 

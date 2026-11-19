@@ -66,8 +66,8 @@ func run(ctx context.Context) error {
 	}
 	first, firstErr := strconv.Atoi(env("MULTIFRP_PORT_FIRST", "30000"))
 	last, lastErr := strconv.Atoi(env("MULTIFRP_PORT_LAST", "30099"))
-	if firstErr != nil || lastErr != nil || first < 20000 || last > 65535 || last < first || last-first >= 256 {
-		return errors.New("the tunnel port range must be within 20000–65535 and contain 1–256 ports")
+	if firstErr != nil || lastErr != nil || first < 20000 || last > 65535 || last < first {
+		return errors.New("the tunnel port range must be within 20000–65535")
 	}
 	zone, err := time.LoadLocation(env("MULTIFRP_TIMEZONE", "Asia/Shanghai"))
 	if err != nil {
@@ -83,12 +83,11 @@ func run(ctx context.Context) error {
 			return fmt.Errorf("tunnel %s uses port %d outside the configured range", t.Name, t.Port)
 		}
 	}
-	g, err := newGateway(os.Getenv("MULTIFRP_TUNNEL_BIND"), first, last)
-	if err != nil {
+	g := newGateway(os.Getenv("MULTIFRP_TUNNEL_BIND"), first, last)
+	defer g.close()
+	if err := g.reconcile(data, func() error { return nil }); err != nil {
 		return err
 	}
-	defer g.close()
-	g.reconcile(data)
 	a := &app{db: db, data: data, gateway: g, adminUser: env("MULTIFRP_ADMIN_USER", "admin"), adminPassword: digest(adminPassword),
 		secureCookies: os.Getenv("MULTIFRP_INSECURE_LOCAL") != "1", zone: zone, sessions: map[string]time.Time{}, online: map[string]bool{}, rates: map[string]rate{},
 		runKey: make([]byte, 32)}
@@ -105,7 +104,7 @@ func run(ctx context.Context) error {
 	go privateHTTP.Serve(pluginListener)
 	frpsConfig := &frpconfig.ServerConfig{BindAddr: "127.0.0.1", BindPort: 7000, ProxyBindAddr: "127.0.0.1",
 		WebServer:         frpconfig.WebServerConfig{Addr: "127.0.0.1", Port: 7500},
-		AllowPorts:        []types.PortsRange{{Start: firstPrivatePort, End: g.privatePort(last)}},
+		AllowPorts:        []types.PortsRange{{Start: firstPrivatePort, End: lastPrivatePort}},
 		MaxPortsPerClient: 32,
 		HTTPPlugins:       []frpconfig.HTTPPluginOptions{{Name: "multifrp", Addr: pluginListener.Addr().String(), Path: "/authorize", Ops: []string{plugin.OpLogin, plugin.OpNewProxy, plugin.OpPing, plugin.OpNewWorkConn}}},
 	}
@@ -149,7 +148,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	mux.Handle("GET /", http.FileServerFS(assets))
-	httpServer := &http.Server{Addr: env("MULTIFRP_HTTP_BIND", ":8080"), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second,
+	httpServer := &http.Server{Addr: env("MULTIFRP_HTTP_BIND", "127.0.0.1:8080"), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'none'")

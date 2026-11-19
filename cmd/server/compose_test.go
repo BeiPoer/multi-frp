@@ -191,6 +191,10 @@ func TestComposeTunnelLifecycle(t *testing.T) {
 	if err != nil || state.Tunnels[0].Enabled {
 		t.Fatalf("disabled tunnel remains enabled: %v", err)
 	}
+	admin("tunnels/"+a.ID, map[string]string{"action": "enable"}, nil)
+	reconnected := connect(a)
+	reconnected.Close()
+	admin("tunnels/"+a.ID, map[string]string{"action": "disable"}, nil)
 	other := connect(b)
 	defer other.Close()
 	admin("devices/"+second.Credentials.DeviceID+"/revoke", struct{}{}, nil)
