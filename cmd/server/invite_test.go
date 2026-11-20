@@ -49,6 +49,8 @@ func TestInvitationHistory(t *testing.T) {
 	mux.HandleFunc("GET /api/admin/state", a.admin(a.dashboard))
 	mux.HandleFunc("POST /api/admin/invites", a.admin(a.invite))
 	mux.HandleFunc("POST /api/admin/invites/{id}/remark", a.admin(a.updateInviteRemark))
+	mux.HandleFunc("POST /api/admin/devices/{id}/revoke", a.admin(a.revoke))
+	mux.HandleFunc("POST /api/admin/devices/{id}/delete", a.admin(a.deleteDevice))
 	mux.HandleFunc("POST /api/client/enroll", a.enroll)
 	mux.HandleFunc("GET /api/client/state", a.clientState)
 	call := func(method, path string, body any, session bool, bearer string, status int) []byte {
@@ -150,4 +152,11 @@ func TestInvitationHistory(t *testing.T) {
 			t.Fatal("legacy device gained an incorrect invitation link")
 		}
 	}
+	devicePath := "/api/admin/devices/" + linked.DeviceID
+	call(http.MethodPost, devicePath+"/delete", struct{}{}, false, "", 401)
+	call(http.MethodPost, devicePath+"/delete", struct{}{}, true, "", 409)
+	call(http.MethodPost, devicePath+"/revoke", struct{}{}, true, "", 200)
+	call(http.MethodPost, devicePath+"/delete", struct{}{}, true, "", 200)
+	call(http.MethodPost, devicePath+"/delete", struct{}{}, true, "", 404)
+	call(http.MethodPost, enroll, map[string]string{"code": first.Code, "name": "Another"}, false, "", 403)
 }

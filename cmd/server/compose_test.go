@@ -253,5 +253,30 @@ func TestComposeTunnelLifecycle(t *testing.T) {
 	if _, err := second.State(ctx); !errors.As(err, &revoked) || revoked.Code != 403 {
 		t.Fatalf("revoked credential still usable: %v", err)
 	}
-	t.Logf("verified both tunnels, active traffic and history persisted under %s", a.ID)
+	admin("tunnels/"+a.ID, map[string]string{"action": "delete"}, nil)
+	state, err = first.State(ctx)
+	if err != nil || len(state.Tunnels) != 0 {
+		t.Fatalf("deleted tunnel still visible to device: %+v %v", state, err)
+	}
+	admin("devices/"+second.Credentials.DeviceID+"/delete", struct{}{}, nil)
+	var dashboard struct {
+		Devices []device
+		Tunnels []tunnelView
+	}
+	admin("state", nil, &dashboard)
+	for _, item := range dashboard.Devices {
+		if item.ID == second.Credentials.DeviceID {
+			t.Fatal("deleted device still listed")
+		}
+	}
+	for _, tunnel := range dashboard.Tunnels {
+		if tunnel.ID == a.ID || tunnel.ID == b.ID {
+			t.Fatal("deleted tunnel still listed")
+		}
+	}
+	replacement, reused := prepare("compose-smoke-reuse", b.Port)
+	admin("tunnels/"+reused.ID, map[string]any{"action": "change-port", "port": a.Port}, nil)
+	replacementPath := "devices/" + replacement.Credentials.DeviceID
+	admin(replacementPath+"/revoke", struct{}{}, nil)
+	admin(replacementPath+"/delete", struct{}{}, nil)
 }

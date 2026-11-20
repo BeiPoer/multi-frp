@@ -195,6 +195,8 @@ func TestAdminPublicPortChange(t *testing.T) {
 	choice := func(action string, port int) string { return fmt.Sprintf(`{"action":%q,"port":%d}`, action, port) }
 	change("one", choice("approve", old), 200)
 	first := g.privatePort("one")
+	change("one", `{"action":"delete"}`, 409)
+	change("two", `{"action":"delete"}`, 409)
 	change("one", `{"action":"change-port"}`, 400)
 	change("one", choice("change-port", 0), 400)
 	change("one", choice("change-port", busy), 409)
@@ -218,6 +220,8 @@ func TestAdminPublicPortChange(t *testing.T) {
 		t.Fatal("editing a disabled tunnel unexpectedly opened its public entry")
 	}
 	change("two", `{"action":"enable"}`, 409)
+	change("two", `{"action":"delete"}`, 200)
+	change("two", `{"action":"delete"}`, 404)
 }
 
 func TestServerTunnelLifecycle(t *testing.T) {

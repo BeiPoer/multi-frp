@@ -424,6 +424,37 @@ func (a *app) revoke(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, true)
 }
 
+func (a *app) deleteDevice(w http.ResponseWriter, r *http.Request) {
+	var request struct{}
+	if !decode(w, r, &request) {
+		return
+	}
+	id := r.PathValue("id")
+	a.mu.Lock()
+	err := a.changeLocked(func(s *state) error {
+		device, ok := s.Devices[id]
+		if !ok {
+			return failure{404, "设备不存在"}
+		}
+		if !device.Revoked {
+			return failure{409, "请先撤销设备授权"}
+		}
+		delete(s.Devices, id)
+		for key, tunnel := range s.Tunnels {
+			if tunnel.DeviceID == id {
+				delete(s.Tunnels, key)
+			}
+		}
+		return nil
+	})
+	a.mu.Unlock()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	respond(w, 200, true)
+}
+
 func (a *app) choosePublicPort(tunnels map[string]control.Tunnel, tunnelID string, requested *int) (int, error) {
 	used := make(map[int]bool)
 	for id, tunnel := range tunnels {
@@ -498,6 +529,12 @@ func (a *app) setTunnel(w http.ResponseWriter, r *http.Request) {
 				return failure{409, "此隧道无法修改"}
 			}
 			tunnel.Enabled = request.Action == "enable"
+		case "delete":
+			if tunnel.Enabled || tunnel.State == "pending" {
+				return failure{409, "请先停用或拒绝隧道"}
+			}
+			delete(s.Tunnels, id)
+			return nil
 		default:
 			return failure{400, "未知操作"}
 		}

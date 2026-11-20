@@ -152,6 +152,14 @@ function render(data) {
       }
       actions.append(button('流量详情', () => openDetail(tunnel)));
     }
+    if (!tunnel.enabled && tunnel.state !== 'pending') {
+      actions.append(button('删除隧道', () => {
+        const release = tunnel.port ? '删除后将释放其公网端口。' : '';
+        if (window.confirm(`删除隧道「${tunnel.name}」？${release}`)) {
+          submit(() => api(`/tunnels/${tunnel.id}`, { action: 'delete' }), '隧道已删除');
+        }
+      }, 'danger'));
+    }
     addCell(row, actions);
   }
   for (const item of data.devices) {
@@ -161,15 +169,22 @@ function render(data) {
     const invite = inviteIndex.get(item.inviteID);
     addCell(row, deviceInvite(invite));
     addCell(row, element('span', item.revoked ? '已撤销' : '已授权', item.revoked ? 'status' : 'status online'));
-    const revoke = () => {
-      if (window.confirm(`撤销「${item.name}」的设备授权并断开其所有隧道？`)) {
-        submit(() => api(`/devices/${item.id}/revoke`, {}), '设备授权已撤销');
-      }
-    };
     const actions = element('div', undefined, 'actions');
     if (invite) actions.append(button('修改授权码备注', () => openInviteDialog(invite)));
-    if (!item.revoked) actions.append(button('撤销授权', revoke, 'danger'));
-    addCell(row, actions.childElementCount ? actions : '—');
+    if (item.revoked) {
+      actions.append(button('删除设备', () => {
+        if (window.confirm(`删除设备「${item.name}」？其所有隧道也将一并删除，已分配的公网端口将被释放。`)) {
+          submit(() => api(`/devices/${item.id}/delete`, {}), '设备已删除');
+        }
+      }, 'danger'));
+    } else {
+      actions.append(button('撤销授权', () => {
+        if (window.confirm(`撤销「${item.name}」的设备授权并断开其所有隧道？`)) {
+          submit(() => api(`/devices/${item.id}/revoke`, {}), '设备授权已撤销');
+        }
+      }, 'danger'));
+    }
+    addCell(row, actions);
   }
   for (const entry of data.invites) {
     const row = invites.insertRow();

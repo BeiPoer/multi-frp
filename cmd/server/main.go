@@ -143,6 +143,7 @@ func run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/admin/invites/{id}/remark", a.admin(a.updateInviteRemark))
 	mux.HandleFunc("POST /api/admin/domain", a.admin(a.domain))
 	mux.HandleFunc("POST /api/admin/devices/{id}/revoke", a.admin(a.revoke))
+	mux.HandleFunc("POST /api/admin/devices/{id}/delete", a.admin(a.deleteDevice))
 	mux.HandleFunc("POST /api/admin/tunnels/{id}", a.admin(a.setTunnel))
 	mux.HandleFunc("GET /api/admin/tunnels/{id}/history", a.admin(a.history))
 	mux.HandleFunc("POST /api/client/enroll", a.enroll)
