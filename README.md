@@ -91,6 +91,8 @@ EXE 首次获准安装时复制到 `%ProgramFiles%\MultiFRP\MultiFRP.exe`。设�
 
 ## 验收
 
+在源码目录运行 `go run ./tools/frpbuild test ./...`。该命令会使用带工作连接校验补丁的 FRP 服务端。服务端镜像通过 `docker build .` 构建。
+
 - 两台设备分别申请并开通隧道。让第一条保持 TCP 长连接传输，确认后台双向带宽和流量在连接关闭前就开始更新。停用第一条，确认其连接断开且第二条仍可访问。
 - 再次执行 `docker compose pull` 和 `docker compose up -d`，确认设备绑定、域名、隧道配置和历史流量仍可查看。
 - 在目标 Windows 上启用自启动后重启，停在密码输入界面。从另一台机器访问由该 Windows 设备映射的、已经启动的本机服务。登录后打开 EXE，确认「×」保留托盘和隧道，「完全退出」断开隧道。

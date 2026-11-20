@@ -26,7 +26,7 @@ func New(remote control.Remote, tunnels []control.Tunnel) (*client.Service, erro
 	config := &v1.ClientCommonConfig{
 		ServerAddr: remote.Origin.Hostname(), ServerPort: port, User: remote.Credentials.DeviceID, ClientID: remote.Credentials.DeviceID,
 		LoginFailExit: new(false), Metadatas: map[string]string{"deviceToken": remote.Credentials.Token},
-		Transport: v1.ClientTransportConfig{Protocol: protocol, WireProtocol: "v2", HeartbeatInterval: 10, HeartbeatTimeout: 30,
+		Transport: v1.ClientTransportConfig{Protocol: protocol, WireProtocol: "v2", TCPMux: new(true), HeartbeatInterval: 10, HeartbeatTimeout: 30,
 			TLS: v1.TLSClientConfig{Enable: new(protocol == "wss"), TLSConfig: v1.TLSConfig{UseSystemCa: true}}},
 	}
 	if err := config.Complete(); err != nil {

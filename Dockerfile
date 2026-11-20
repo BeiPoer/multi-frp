@@ -4,7 +4,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/server ./cmd/server
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/multifrp ./cmd/server
+COPY tools/frpbuild ./tools/frpbuild
+RUN CGO_ENABLED=0 go run ./tools/frpbuild build -trimpath -ldflags='-s -w' -o /out/multifrp ./cmd/server
 
 FROM alpine:3.23
 RUN apk add --no-cache ca-certificates \

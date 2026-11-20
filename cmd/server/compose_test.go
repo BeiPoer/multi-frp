@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,7 +96,19 @@ func TestComposeTunnelLifecycle(t *testing.T) {
 		}
 	}()
 	localPort := backend.Addr().(*net.TCPAddr).Port
-	prepare := func(name string, port int) (control.Remote, control.Tunnel, *client.Service) {
+	startClient := func(owner control.Remote, tunnel control.Tunnel) (*client.Service, func()) {
+		t.Helper()
+		service, err := engine.New(owner, []control.Tunnel{tunnel})
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan struct{})
+		go func() { defer close(done); _ = service.Run(ctx) }()
+		stop := sync.OnceFunc(func() { service.Close(); <-done })
+		t.Cleanup(stop)
+		return service, stop
+	}
+	prepare := func(name string, port int) (control.Remote, control.Tunnel) {
 		t.Helper()
 		var invite struct{ Code string }
 		admin("invites", struct{}{}, &invite)
@@ -127,17 +140,12 @@ func TestComposeTunnelLifecycle(t *testing.T) {
 		if port != 0 && state.Tunnels[0].Port != port {
 			t.Fatalf("requested %d, assigned %d", port, state.Tunnels[0].Port)
 		}
-		service, err := engine.New(owner, state.Tunnels)
-		if err != nil {
-			t.Fatal(err)
-		}
-		done := make(chan struct{})
-		go func() { defer close(done); _ = service.Run(ctx) }()
-		t.Cleanup(func() { service.Close(); <-done })
-		return owner, state.Tunnels[0], service
+		return owner, state.Tunnels[0]
 	}
-	first, a, service := prepare("compose-smoke-active", pool.PortLast)
-	second, b, _ := prepare("compose-smoke-idle", 0)
+	first, a := prepare("compose-smoke-active", pool.PortLast)
+	service, stopFirst := startClient(first, a)
+	second, b := prepare("compose-smoke-idle", 0)
+	startClient(second, b)
 	connect := func(tunnel control.Tunnel) net.Conn {
 		t.Helper()
 		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
@@ -232,6 +240,10 @@ func TestComposeTunnelLifecycle(t *testing.T) {
 	}
 	admin("tunnels/"+a.ID, map[string]string{"action": "enable"}, nil)
 	reconnected := connect(a)
+	reconnected.Close()
+	stopFirst()
+	startClient(first, a)
+	reconnected = connect(a)
 	reconnected.Close()
 	admin("tunnels/"+a.ID, map[string]string{"action": "disable"}, nil)
 	other := connect(b)

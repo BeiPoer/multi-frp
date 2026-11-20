@@ -37,6 +37,9 @@ var webFiles embed.FS
 const frpAddr = "127.0.0.1:7000"
 const dashboardAddr = "127.0.0.1:7500"
 
+// Require the patched FRP dependency in every build of the server.
+var _ = server.RequireWorkConnLoginSession
+
 func randomID(size int) string {
 	value := make([]byte, size)
 	rand.Read(value)
@@ -103,6 +106,7 @@ func run(ctx context.Context) error {
 	defer privateHTTP.Close()
 	go privateHTTP.Serve(pluginListener)
 	frpsConfig := &frpconfig.ServerConfig{BindAddr: "127.0.0.1", BindPort: 7000, ProxyBindAddr: "127.0.0.1",
+		Transport:         frpconfig.ServerTransportConfig{TCPMux: new(true)},
 		WebServer:         frpconfig.WebServerConfig{Addr: "127.0.0.1", Port: 7500},
 		AllowPorts:        []types.PortsRange{{Start: firstPrivatePort, End: lastPrivatePort}},
 		MaxPortsPerClient: 32,
