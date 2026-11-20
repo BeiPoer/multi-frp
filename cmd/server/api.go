@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	bolt "go.etcd.io/bbolt"
 	"multifrp/internal/control"
@@ -45,6 +47,12 @@ type tunnelView struct {
 	Device string  `json:"device"`
 	Rate   rate    `json:"rate"`
 	Today  traffic `json:"today"`
+}
+
+type invitationView struct {
+	invitation
+	ID     string `json:"id"`
+	Status string `json:"status"`
 }
 
 type failure struct {
@@ -176,11 +184,14 @@ func (a *app) enroll(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	err := a.changeLocked(func(s *state) error {
 		key := digest(request.Code)
-		if !s.Invites[key].After(time.Now()) {
+		invite := s.Invites[key]
+		if !invite.available(time.Now()) {
 			return failure{403, "邀请码无效、已使用或已过期"}
 		}
-		delete(s.Invites, key)
-		s.Devices[result.DeviceID] = device{ID: result.DeviceID, Name: request.Name, TokenHash: digest(result.Token)}
+		invite.DeviceID = result.DeviceID
+		invite.Code = request.Code
+		s.Invites[key] = invite
+		s.Devices[result.DeviceID] = device{ID: result.DeviceID, Name: request.Name, TokenHash: digest(result.Token), InviteID: key}
 		return nil
 	})
 	a.mu.Unlock()
@@ -273,25 +284,40 @@ func (a *app) requestTunnel(w http.ResponseWriter, r *http.Request) {
 	respond(w, 201, tunnel)
 }
 
-func (a *app) invite(w http.ResponseWriter, r *http.Request) {
-	var request struct{}
+func readInviteRemark(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var request struct{ Remark string }
 	if !decode(w, r, &request) {
+		return "", false
+	}
+	remark := strings.TrimSpace(request.Remark)
+	if utf8.RuneCountInString(remark) > 200 {
+		fail(w, failure{400, "授权码备注最多 200 个字符"})
+		return "", false
+	}
+	return remark, true
+}
+
+func (a *app) invite(w http.ResponseWriter, r *http.Request) {
+	remark, ok := readInviteRemark(w, r)
+	if !ok {
 		return
 	}
 	code := randomID(16)
 	now := time.Now()
-	expires := now.Add(24 * time.Hour)
+	entry := invitation{Code: code, Remark: remark, CreatedAt: now, Expires: now.Add(24 * time.Hour)}
+	id := digest(code)
 	a.mu.Lock()
 	err := a.changeLocked(func(s *state) error {
-		for key, expiry := range s.Invites {
-			if !expiry.After(now) {
-				delete(s.Invites, key)
+		active := 0
+		for _, item := range s.Invites {
+			if item.available(now) {
+				active++
 			}
 		}
-		if len(s.Invites) >= 256 {
-			return failure{409, "未使用的邀请码已达上限"}
+		if active >= 256 {
+			return failure{409, "有效且未使用的授权码已达上限"}
 		}
-		s.Invites[digest(code)] = expires
+		s.Invites[id] = entry
 		return nil
 	})
 	a.mu.Unlock()
@@ -299,7 +325,31 @@ func (a *app) invite(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	respond(w, 201, map[string]any{"code": code, "expires": expires})
+	respond(w, 201, invitationView{invitation: entry, ID: id, Status: "unused"})
+}
+
+func (a *app) updateInviteRemark(w http.ResponseWriter, r *http.Request) {
+	remark, ok := readInviteRemark(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	a.mu.Lock()
+	err := a.changeLocked(func(s *state) error {
+		entry, ok := s.Invites[id]
+		if !ok {
+			return failure{404, "授权码不存在"}
+		}
+		entry.Remark = remark
+		s.Invites[id] = entry
+		return nil
+	})
+	a.mu.Unlock()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	respond(w, 200, true)
 }
 
 var domainLabel = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -374,8 +424,37 @@ func (a *app) revoke(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, true)
 }
 
+func (a *app) choosePublicPort(tunnels map[string]control.Tunnel, tunnelID string, requested *int) (int, error) {
+	used := make(map[int]bool)
+	for id, tunnel := range tunnels {
+		if id != tunnelID && tunnel.Port != 0 {
+			used[tunnel.Port] = true
+		}
+	}
+	first, last := a.gateway.first, a.gateway.last
+	if requested != nil {
+		port := *requested
+		if port < first || port > last {
+			return 0, failure{400, fmt.Sprintf("公网端口必须在 %d–%d 之间", first, last)}
+		}
+		if used[port] {
+			return 0, failure{409, fmt.Sprintf("公网端口 %d 已分配给其他隧道", port)}
+		}
+		return port, nil
+	}
+	for port := first; port <= last; port++ {
+		if !used[port] {
+			return port, nil
+		}
+	}
+	return 0, failure{409, "端口池已满"}
+}
+
 func (a *app) setTunnel(w http.ResponseWriter, r *http.Request) {
-	var request struct{ Action string }
+	var request struct {
+		Action string
+		Port   *int
+	}
 	if !decode(w, r, &request) {
 		return
 	}
@@ -387,26 +466,28 @@ func (a *app) setTunnel(w http.ResponseWriter, r *http.Request) {
 			return failure{404, "隧道不存在"}
 		}
 		switch request.Action {
-		case "approve":
-			if tunnel.State != "pending" || s.Devices[tunnel.DeviceID].Revoked {
-				return failure{409, "此隧道无法批准"}
+		case "approve", "change-port":
+			if s.Devices[tunnel.DeviceID].Revoked {
+				return failure{409, "设备授权已撤销"}
 			}
-			used := make(map[int]bool)
-			for _, item := range s.Tunnels {
-				if item.Port != 0 {
-					used[item.Port] = true
+			if request.Action == "approve" {
+				if tunnel.State != "pending" {
+					return failure{409, "此隧道无法批准"}
+				}
+				tunnel.State, tunnel.Enabled = "approved", true
+			} else {
+				if tunnel.State != "approved" {
+					return failure{409, "只有已批准的隧道可以修改公网端口"}
+				}
+				if request.Port == nil {
+					return failure{400, "请输入公网端口"}
 				}
 			}
-			for port := a.gateway.first; port <= a.gateway.last; port++ {
-				if !used[port] {
-					tunnel.Port = port
-					break
-				}
+			port, err := a.choosePublicPort(s.Tunnels, id, request.Port)
+			if err != nil {
+				return err
 			}
-			if tunnel.Port == 0 {
-				return failure{409, "端口池已满"}
-			}
-			tunnel.State, tunnel.Enabled = "approved", true
+			tunnel.Port = port
 		case "reject":
 			if tunnel.State != "pending" {
 				return failure{409, "此隧道无法拒绝"}
@@ -432,10 +513,22 @@ func (a *app) setTunnel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().In(a.zone)
 	a.mu.RLock()
 	domain := a.data.Domain
 	devices := []device{}
 	tunnels := []tunnelView{}
+	invites := make([]invitationView, 0, len(a.data.Invites))
+	for id, entry := range a.data.Invites {
+		status := "expired"
+		switch {
+		case entry.DeviceID != "":
+			status = "used"
+		case entry.available(now):
+			status = "unused"
+		}
+		invites = append(invites, invitationView{invitation: entry, ID: id, Status: status})
+	}
 	for _, item := range a.data.Devices {
 		item.TokenHash = ""
 		devices = append(devices, item)
@@ -444,7 +537,6 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 		tunnels = append(tunnels, tunnelView{Tunnel: a.decorate(tunnel), Device: a.data.Devices[tunnel.DeviceID].Name, Rate: a.rates[id]})
 	}
 	a.mu.RUnlock()
-	now := time.Now().In(a.zone)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, a.zone)
 	err := a.db.View(func(tx *bolt.Tx) error {
 		root := tx.Bucket(trafficBucket)
@@ -459,7 +551,14 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	slices.SortFunc(devices, func(x, y device) int { return strings.Compare(x.Name, y.Name) })
 	slices.SortFunc(tunnels, func(x, y tunnelView) int { return strings.Compare(x.Name, y.Name) })
-	respond(w, 200, map[string]any{"domain": domain, "devices": devices, "tunnels": tunnels, "timezone": a.zone.String()})
+	slices.SortFunc(invites, func(x, y invitationView) int {
+		if order := y.CreatedAt.Compare(x.CreatedAt); order != 0 {
+			return order
+		}
+		return strings.Compare(x.ID, y.ID)
+	})
+	respond(w, 200, map[string]any{"domain": domain, "devices": devices, "tunnels": tunnels,
+		"invites": invites, "timezone": a.zone.String(), "portFirst": a.gateway.first, "portLast": a.gateway.last})
 }
 
 func (a *app) history(w http.ResponseWriter, r *http.Request) {

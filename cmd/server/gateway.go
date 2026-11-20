@@ -31,8 +31,8 @@ type connection struct{ client net.Conn }
 type gateway struct {
 	first, last int
 	host        string
-	// Keep assignments across disable/re-enable until old FRP proxies have gone away.
-	privatePorts map[int]int
+	// Keep the private port tied to the tunnel while its public entry can change owners.
+	privatePorts map[string]int
 	mu           sync.Mutex
 	routes       map[int]*route
 	meters       map[string]*meter
@@ -44,13 +44,13 @@ const firstPrivatePort = 12000
 const lastPrivatePort = 19999
 
 func newGateway(host string, first, last int) *gateway {
-	return &gateway{first: first, last: last, host: host, privatePorts: map[int]int{}, routes: map[int]*route{}, meters: map[string]*meter{}}
+	return &gateway{first: first, last: last, host: host, privatePorts: map[string]int{}, routes: map[int]*route{}, meters: map[string]*meter{}}
 }
 
-func (g *gateway) privatePort(publicPort int) int {
+func (g *gateway) privatePort(tunnelID string) int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.privatePorts[publicPort]
+	return g.privatePorts[tunnelID]
 }
 
 // Reserve listeners before saving; a failed bind or save must leave existing routes intact.
@@ -71,7 +71,7 @@ func (g *gateway) reconcile(data state, save func() error) error {
 	for _, port := range privatePorts {
 		used[port] = true
 	}
-	for _, tunnel := range data.Tunnels {
+	for id, tunnel := range data.Tunnels {
 		if tunnel.State != "approved" || !tunnel.Enabled || data.Devices[tunnel.DeviceID].Revoked || g.routes[tunnel.Port] != nil {
 			continue
 		}
@@ -80,7 +80,7 @@ func (g *gateway) reconcile(data state, save func() error) error {
 			return failure{409, fmt.Sprintf("公网端口 %d 无法监听，请检查是否已被占用：%v", tunnel.Port, err)}
 		}
 		added[tunnel.Port] = listener
-		if privatePorts[tunnel.Port] == 0 {
+		if privatePorts[id] == 0 {
 			for port := firstPrivatePort; port <= lastPrivatePort; port++ {
 				if used[port] {
 					continue
@@ -90,10 +90,10 @@ func (g *gateway) reconcile(data state, save func() error) error {
 					continue
 				}
 				_ = probe.Close()
-				privatePorts[tunnel.Port], used[port] = port, true
+				privatePorts[id], used[port] = port, true
 				break
 			}
-			if privatePorts[tunnel.Port] == 0 {
+			if privatePorts[id] == 0 {
 				return failure{409, "内部转发端口已耗尽"}
 			}
 		}
@@ -125,7 +125,7 @@ func (g *gateway) reconcile(data state, save func() error) error {
 		r := &route{id: id, listener: added[tunnel.Port], meter: g.meters[id], connections: map[*connection]context.CancelFunc{}}
 		g.routes[tunnel.Port] = r
 		delete(added, tunnel.Port)
-		privatePort := g.privatePorts[tunnel.Port]
+		privatePort := g.privatePorts[id]
 		g.workers.Go(func() { g.accept(r, privatePort) })
 	}
 	return nil

@@ -24,9 +24,7 @@ h2 { font-size: 18px; }
 .login { padding: 28px; max-width: 390px; margin: 40px auto 18px; }
 .login form { margin-top: 24px; display: grid; gap: 14px; }
 .login button { margin-top: 4px; }
-.settings, .invitation { padding: 18px 22px; }
-.invitation { display: flex; justify-content: space-between; align-items: center; }
-.invitation p { margin: 6px 0; overflow-wrap: anywhere; }
+.settings { padding: 18px 22px; }
 .settings form { display: flex; align-items: end; gap: 10px; }
 .settings label { width: min(430px, 100%); }
 label { display: block; font-weight: 650; }
@@ -60,6 +58,12 @@ td button { min-height: 30px; }
 #message.error { background: #fce9e9; color: #95212b; }
 dialog { width: min(810px, calc(100% - 32px)); border: 1px solid var(--border); border-radius: 12px; padding: 23px; color: inherit; }
 dialog::backdrop { background: #15223985; }
+#port-dialog, #invite-dialog { max-width: 420px; }
+.dialog-form { display: grid; gap: 12px; margin-top: 16px; }
+.dialog-error { color: #95212b; }
+.dialog-actions { display: flex; justify-content: end; gap: 8px; }
+.section-link { color: var(--blue); align-self: center; white-space: nowrap; }
+.invite-remark { display: block; max-width: 240px; white-space: normal; overflow-wrap: anywhere; }
 .chart-settings { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .legend { margin-top: 18px; display: flex; gap: 16px; color: var(--muted); }
 .legend span::before { content: ''; border-left: 11px solid #205cd4; margin-right: 6px; }

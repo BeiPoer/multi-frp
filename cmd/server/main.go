@@ -136,6 +136,7 @@ func run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/admin/logout", a.admin(a.logout))
 	mux.HandleFunc("GET /api/admin/state", a.admin(a.dashboard))
 	mux.HandleFunc("POST /api/admin/invites", a.admin(a.invite))
+	mux.HandleFunc("POST /api/admin/invites/{id}/remark", a.admin(a.updateInviteRemark))
 	mux.HandleFunc("POST /api/admin/domain", a.admin(a.domain))
 	mux.HandleFunc("POST /api/admin/devices/{id}/revoke", a.admin(a.revoke))
 	mux.HandleFunc("POST /api/admin/tunnels/{id}", a.admin(a.setTunnel))
@@ -204,8 +205,10 @@ func (a *app) authorizeFRP(w http.ResponseWriter, r *http.Request) {
 		owner, id, _ := strings.Cut(proxy.ProxyName, ".")
 		tunnel, ok := a.data.Tunnels[id]
 		if ok && owner == proxy.User.User && tunnel.DeviceID == owner && tunnel.State == "approved" && tunnel.Enabled && proxy.ProxyType == "tcp" && proxy.Group == "" && proxy.RemotePort == tunnel.Port {
-			proxy.RemotePort = a.gateway.privatePort(tunnel.Port)
-			response = plugin.Response{Content: proxy}
+			if privatePort := a.gateway.privatePort(id); privatePort != 0 {
+				proxy.RemotePort = privatePort
+				response = plugin.Response{Content: proxy}
+			}
 		}
 	}
 	respond(w, 200, response)

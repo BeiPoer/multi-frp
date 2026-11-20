@@ -60,7 +60,7 @@ func TestGatewayOnDemandAndRollback(t *testing.T) {
 	if err := g.reconcile(data, save); err != nil {
 		t.Fatal(err)
 	}
-	private := g.privatePort(port)
+	private := g.privatePort(tunnel.ID)
 	if private < firstPrivatePort || private > lastPrivatePort {
 		t.Fatal("invalid private port")
 	}
@@ -93,7 +93,7 @@ func TestGatewayOnDemandAndRollback(t *testing.T) {
 	if err := g.reconcile(data, save); err != nil {
 		t.Fatal(err)
 	}
-	if g.privatePort(port) != private {
+	if g.privatePort(tunnel.ID) != private {
 		t.Fatal("re-enable changed internal destination")
 	}
 	g.close()
@@ -160,6 +160,66 @@ func TestApprovalConflictDoesNotPersist(t *testing.T) {
 	}
 }
 
+func TestAdminPublicPortChange(t *testing.T) {
+	db, data, err := openStore(filepath.Join(t.TempDir(), "state.db"), "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	busy := blocker.Addr().(*net.TCPAddr).Port
+	old, next := freePort(t), freePort(t)
+	for old == next {
+		next = freePort(t)
+	}
+	g := newGateway("127.0.0.1", min(old, next, busy), max(old, next, busy))
+	defer g.close()
+	data.Tunnels["one"] = control.Tunnel{ID: "one", DeviceID: "device-one", State: "pending"}
+	data.Tunnels["two"] = control.Tunnel{ID: "two", DeviceID: "device-two", State: "pending"}
+	a := &app{db: db, data: data, gateway: g}
+	change := func(id, payload string, status int) {
+		t.Helper()
+		r := httptest.NewRequest("POST", "/", strings.NewReader(payload))
+		r.Header.Set("Content-Type", "application/json")
+		r.SetPathValue("id", id)
+		w := httptest.NewRecorder()
+		a.setTunnel(w, r)
+		if w.Code != status {
+			t.Fatalf("tunnel %s %s: got %d, want %d: %s", id, payload, w.Code, status, w.Body)
+		}
+	}
+	choice := func(action string, port int) string { return fmt.Sprintf(`{"action":%q,"port":%d}`, action, port) }
+	change("one", choice("approve", old), 200)
+	first := g.privatePort("one")
+	change("one", `{"action":"change-port"}`, 400)
+	change("one", choice("change-port", 0), 400)
+	change("one", choice("change-port", busy), 409)
+	change("two", choice("approve", old), 409)
+	if a.data.Tunnels["one"].Port != old || g.routes[old] == nil {
+		t.Fatal("a rejected change interrupted the old route")
+	}
+	change("one", choice("change-port", next), 200)
+	assertPortFree(t, old)
+	if a.data.Tunnels["one"].Port != next || g.routes[next] == nil || g.privatePort("one") != first {
+		t.Fatal("changing the public port lost the tunnel's private listener assignment")
+	}
+	change("two", choice("approve", old), 200)
+	if g.privatePort("two") == 0 || g.privatePort("two") == first || g.routes[old].id != "two" {
+		t.Fatal("the reused public port must never forward to the previous owner's FRP listener")
+	}
+	change("two", `{"action":"disable"}`, 200)
+	change("two", choice("change-port", next), 409)
+	change("two", choice("change-port", busy), 200)
+	if a.data.Tunnels["two"].Enabled || a.data.Tunnels["two"].Port != busy || g.routes[busy] != nil {
+		t.Fatal("editing a disabled tunnel unexpectedly opened its public entry")
+	}
+	change("two", `{"action":"enable"}`, 409)
+}
+
 func TestServerTunnelLifecycle(t *testing.T) {
 	origin := fmt.Sprintf("http://127.0.0.1:%d", freePort(t))
 	t.Setenv("MULTIFRP_HOST", "localhost")
@@ -209,4 +269,5 @@ func TestServerTunnelLifecycle(t *testing.T) {
 	TestComposeTunnelLifecycle(t)
 	assertPortFree(t, 30000)
 	assertPortFree(t, 30001)
+	assertPortFree(t, 40000)
 }

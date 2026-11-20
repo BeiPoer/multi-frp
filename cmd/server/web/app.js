@@ -1,6 +1,18 @@
 const byId = (id) => document.getElementById(id);
 const detail = byId('detail');
 const domain = byId('domain');
+const portDialog = byId('port-dialog');
+const portForm = byId('port-form');
+const portInput = byId('public-port');
+const portSave = byId('port-save');
+const portCancel = byId('port-cancel');
+const portError = byId('port-error');
+const inviteDialog = byId('invite-dialog');
+const inviteForm = byId('invite-form');
+const inviteRemark = byId('invite-remark');
+const inviteSave = byId('invite-save');
+const inviteCancel = byId('invite-cancel');
+const inviteError = byId('invite-error');
 const chart = byId('chart');
 const ctx = chart.getContext('2d');
 let session = false;
@@ -33,9 +45,11 @@ function displaySession(value) {
   byId('dashboard').hidden = !value;
   byId('logout').hidden = !value;
   if (!value) {
-    byId('invitation').hidden = true;
-    byId('invite-code').textContent = '';
+    byId('devices').replaceChildren();
+    byId('invites').replaceChildren();
     if (detail.open) detail.close();
+    if (portDialog.open) portDialog.close();
+    if (inviteDialog.open) inviteDialog.close();
   }
 }
 
@@ -87,16 +101,36 @@ function emptyRow(body, columns, text) {
   body.insertRow().append(cell);
 }
 
+function inviteCode(entry) {
+  return entry.code ? element('code', entry.code) : element('small', '旧授权码不可回显');
+}
+
+function deviceInvite(entry) {
+  if (!entry) return element('small', '—');
+  const node = element('div');
+  node.append(inviteCode(entry), element('small', entry.remark || '未填写备注', 'invite-remark'));
+  return node;
+}
+
+function inviteStatus(status) {
+  if (status === 'unused') return element('span', '未使用', 'status online');
+  return element('span', status === 'used' ? '已使用' : '已过期', 'status');
+}
+
 function render(data) {
   if (document.activeElement !== domain && !domain.dataset.editing) domain.value = data.domain;
   byId('timezone').textContent = `统计时区 ${data.timezone}`;
   const tunnels = byId('tunnels');
   const devices = byId('devices');
+  const invites = byId('invites');
   tunnels.replaceChildren();
   devices.replaceChildren();
+  invites.replaceChildren();
   if (!data.tunnels.length) emptyRow(tunnels, 6, '暂无隧道申请');
-  if (!data.devices.length) emptyRow(devices, 4, '暂无已绑定设备');
+  if (!data.devices.length) emptyRow(devices, 5, '暂无已绑定设备');
+  if (!data.invites.length) emptyRow(invites, 6, '暂无授权码');
   const deviceIndex = new Map(data.devices.map((item) => [item.id, item]));
+  const inviteIndex = new Map(data.invites.map((item) => [item.id, item]));
   for (const tunnel of data.tunnels) {
     const row = tunnels.insertRow();
     addCell(row, element('strong', tunnel.name), element('br'), element('small', tunnel.device));
@@ -107,11 +141,13 @@ function render(data) {
     addCell(row, ...directions(tunnel.today, bytes));
     const actions = element('div', undefined, 'actions');
     const change = (action) => submit(() => api(`/tunnels/${tunnel.id}`, { action }), '隧道状态已更新');
+    const openPort = () => openPortDialog(tunnel, data.portFirst, data.portLast);
     if (tunnel.state === 'pending') {
-      actions.append(button('批准', () => change('approve')), button('拒绝', () => change('reject'), 'danger'));
+      actions.append(button('批准', openPort), button('拒绝', () => change('reject'), 'danger'));
     }
     if (tunnel.state === 'approved') {
       if (!deviceIndex.get(tunnel.deviceID)?.revoked) {
+        actions.append(button('改端口', openPort));
         actions.append(button(tunnel.enabled ? '停用' : '启用', () => change(tunnel.enabled ? 'disable' : 'enable')));
       }
       actions.append(button('流量详情', () => openDetail(tunnel)));
@@ -122,13 +158,30 @@ function render(data) {
     const row = devices.insertRow();
     addCell(row, item.name);
     addCell(row, element('code', item.id));
+    const invite = inviteIndex.get(item.inviteID);
+    addCell(row, deviceInvite(invite));
     addCell(row, element('span', item.revoked ? '已撤销' : '已授权', item.revoked ? 'status' : 'status online'));
     const revoke = () => {
       if (window.confirm(`撤销「${item.name}」的设备授权并断开其所有隧道？`)) {
         submit(() => api(`/devices/${item.id}/revoke`, {}), '设备授权已撤销');
       }
     };
-    addCell(row, item.revoked ? '—' : button('撤销授权', revoke, 'danger'));
+    const actions = element('div', undefined, 'actions');
+    if (invite) actions.append(button('修改授权码备注', () => openInviteDialog(invite)));
+    if (!item.revoked) actions.append(button('撤销授权', revoke, 'danger'));
+    addCell(row, actions.childElementCount ? actions : '—');
+  }
+  for (const entry of data.invites) {
+    const row = invites.insertRow();
+    addCell(row, inviteCode(entry));
+    addCell(row, element('div', entry.remark || '—', 'invite-remark'));
+    addCell(row, inviteStatus(entry.status));
+    addCell(row, deviceIndex.get(entry.deviceID)?.name || '—');
+    addCell(row, new Date(entry.expires).toLocaleString('zh-CN'));
+    const actions = element('div', undefined, 'actions');
+    if (entry.status === 'unused' && entry.code) actions.append(button('复制', () => copyInvite(entry.code)));
+    actions.append(button('修改备注', () => openInviteDialog(entry)));
+    addCell(row, actions);
   }
 }
 
@@ -158,6 +211,51 @@ async function submit(action, message) {
   }
 }
 
+portCancel.onclick = () => portDialog.close();
+portDialog.oncancel = (event) => {
+  if (portSave.disabled) event.preventDefault();
+};
+
+function openPortDialog(tunnel, first, last) {
+  const editing = tunnel.state === 'approved';
+  byId('port-title').textContent = `${editing ? '修改公网端口' : '批准隧道'} · ${tunnel.name}`;
+  byId('port-help').textContent = `可选范围 ${first}–${last}。${editing
+    ? (tunnel.enabled ? '改端口会断开旧端口的现有连接。' : '新端口将在隧道启用时监听。')
+    : '留空时自动分配。'}`;
+  portInput.min = first;
+  portInput.max = last;
+  portInput.required = editing;
+  portInput.value = editing ? tunnel.port : '';
+  portSave.textContent = editing ? '保存端口' : '批准';
+  portError.hidden = true;
+  portForm.onsubmit = async (event) => {
+    event.preventDefault();
+    if (portSave.disabled) return;
+    const payload = { action: editing ? 'change-port' : 'approve' };
+    if (portInput.value !== '') payload.port = portInput.valueAsNumber;
+    portSave.disabled = portCancel.disabled = true;
+    portError.hidden = true;
+    try {
+      await api(`/tunnels/${tunnel.id}`, payload);
+      portDialog.close();
+      showMessage(editing ? '公网端口已保存' : '隧道已批准');
+      if (document.activeElement.closest('table')) document.activeElement.blur();
+      await refresh();
+    } catch (error) {
+      if (error.status === 401) {
+        displaySession(false);
+        showMessage(error.message, true);
+      } else {
+        portError.textContent = error.message;
+        portError.hidden = false;
+      }
+    } finally {
+      portSave.disabled = portCancel.disabled = false;
+    }
+  };
+  portDialog.showModal();
+}
+
 byId('login-form').onsubmit = (event) => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -177,16 +275,50 @@ byId('domain-form').onsubmit = (event) => {
     domain.blur();
   }, '域名已保存');
 };
-byId('invite').onclick = () => submit(async () => {
-  const invite = await api('/invites', {});
-  byId('invite-code').textContent = invite.code;
-  byId('invite-expiry').textContent = `有效期至 ${new Date(invite.expires).toLocaleString('zh-CN')}`;
-  byId('invitation').hidden = false;
-}, '');
-byId('copy-invite').onclick = async () => {
-  try { await navigator.clipboard.writeText(byId('invite-code').textContent); showMessage('邀请码已复制'); }
-  catch { showMessage('可选中邀请码手动复制', true); }
+byId('invite').onclick = () => openInviteDialog();
+inviteCancel.onclick = () => inviteDialog.close();
+inviteDialog.oncancel = (event) => {
+  if (inviteSave.disabled) event.preventDefault();
 };
+
+function openInviteDialog(invite) {
+  byId('invite-title').textContent = invite ? '修改授权码备注' : '生成授权码';
+  inviteRemark.value = invite?.remark || '';
+  inviteSave.textContent = invite ? '保存备注' : '生成';
+  inviteError.hidden = true;
+  inviteForm.onsubmit = async (event) => {
+    event.preventDefault();
+    if (inviteSave.disabled) return;
+    inviteSave.disabled = inviteCancel.disabled = true;
+    inviteError.hidden = true;
+    try {
+      const path = invite ? `/invites/${invite.id}/remark` : '/invites';
+      await api(path, { remark: inviteRemark.value });
+      inviteDialog.close();
+      showMessage(invite ? '备注已保存' : '授权码已生成');
+      if (document.activeElement.closest('table')) document.activeElement.blur();
+      await refresh();
+      if (!invite) byId('invite-list').scrollIntoView({ block: 'start' });
+    } catch (error) {
+      if (error.status === 401) {
+        displaySession(false);
+        showMessage(error.message, true);
+      } else {
+        inviteError.textContent = error.message;
+        inviteError.hidden = false;
+      }
+    } finally {
+      inviteSave.disabled = inviteCancel.disabled = false;
+    }
+  };
+  inviteDialog.showModal();
+}
+
+async function copyInvite(code) {
+  try { await navigator.clipboard.writeText(code); showMessage('授权码已复制'); }
+  catch { showMessage('可选中授权码手动复制', true); }
+  if (document.activeElement.closest('table')) document.activeElement.blur();
+}
 
 function openDetail(tunnel) {
   currentTunnel = tunnel.id;

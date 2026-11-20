@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fatedier/frp/client"
 	"multifrp/internal/control"
 	"multifrp/internal/engine"
 )
@@ -74,6 +75,11 @@ func TestComposeTunnelLifecycle(t *testing.T) {
 	}
 	admin("login", map[string]string{"user": "admin", "password": os.Getenv("MULTIFRP_TEST_PASSWORD")}, nil)
 	admin("domain", map[string]string{"domain": "localhost"}, nil)
+	var pool struct{ PortFirst, PortLast int }
+	admin("state", nil, &pool)
+	if pool.PortLast-pool.PortFirst < 2 {
+		t.Fatal("the lifecycle test needs at least three public ports")
+	}
 	backend, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +95,7 @@ func TestComposeTunnelLifecycle(t *testing.T) {
 		}
 	}()
 	localPort := backend.Addr().(*net.TCPAddr).Port
-	prepare := func(name string) (control.Remote, control.Tunnel) {
+	prepare := func(name string, port int) (control.Remote, control.Tunnel, *client.Service) {
 		t.Helper()
 		var invite struct{ Code string }
 		admin("invites", struct{}{}, &invite)
@@ -109,10 +115,17 @@ func TestComposeTunnelLifecycle(t *testing.T) {
 		if err != nil || len(state.Tunnels) != 1 || state.Tunnels[0].State != "pending" || state.Tunnels[0].Address != "" {
 			t.Fatalf("unexpected pending state: %+v %v", state, err)
 		}
-		admin("tunnels/"+state.Tunnels[0].ID, map[string]string{"action": "approve"}, nil)
+		approval := map[string]any{"action": "approve"}
+		if port != 0 {
+			approval["port"] = port
+		}
+		admin("tunnels/"+state.Tunnels[0].ID, approval, nil)
 		state, err = owner.State(ctx)
 		if err != nil || len(state.Tunnels) != 1 || state.Tunnels[0].Address != "localhost:"+strconv.Itoa(state.Tunnels[0].Port) {
 			t.Fatalf("unexpected approved state: %+v %v", state, err)
+		}
+		if port != 0 && state.Tunnels[0].Port != port {
+			t.Fatalf("requested %d, assigned %d", port, state.Tunnels[0].Port)
 		}
 		service, err := engine.New(owner, state.Tunnels)
 		if err != nil {
@@ -121,10 +134,10 @@ func TestComposeTunnelLifecycle(t *testing.T) {
 		done := make(chan struct{})
 		go func() { defer close(done); _ = service.Run(ctx) }()
 		t.Cleanup(func() { service.Close(); <-done })
-		return owner, state.Tunnels[0]
+		return owner, state.Tunnels[0], service
 	}
-	first, a := prepare("compose-smoke-active")
-	second, b := prepare("compose-smoke-idle")
+	first, a, service := prepare("compose-smoke-active", pool.PortLast)
+	second, b, _ := prepare("compose-smoke-idle", 0)
 	connect := func(tunnel control.Tunnel) net.Conn {
 		t.Helper()
 		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
@@ -180,6 +193,32 @@ func TestComposeTunnelLifecycle(t *testing.T) {
 	if history.Total.In == 0 || history.Total.Out == 0 {
 		t.Fatal("historical counts are absent")
 	}
+	oldAddress := a.Address
+	newPort := pool.PortFirst
+	if newPort == b.Port {
+		newPort++
+	}
+	admin("tunnels/"+a.ID, map[string]any{"action": "change-port", "port": newPort}, nil)
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Read(buffer); err == nil {
+		t.Fatal("an existing connection survived moving the public entry")
+	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+		t.Fatal("moving the public entry did not close the old connection")
+	}
+	if old, err := net.DialTimeout("tcp", oldAddress, time.Second); err == nil {
+		old.Close()
+		t.Fatal("previous public entry still accepts connections")
+	}
+	moved, err := first.State(ctx)
+	if err != nil || len(moved.Tunnels) != 1 || moved.Tunnels[0].ID != a.ID || moved.Tunnels[0].Address != "localhost:"+strconv.Itoa(newPort) {
+		t.Fatalf("client did not receive new public port: %+v %v", moved, err)
+	}
+	if err := engine.Update(service, moved.Tunnels); err != nil {
+		t.Fatal(err)
+	}
+	a = moved.Tunnels[0]
+	conn = connect(a)
+	defer conn.Close()
 	admin("tunnels/"+a.ID, map[string]string{"action": "disable"}, nil)
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	if _, err := conn.Read(buffer); err == nil {

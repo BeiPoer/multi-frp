@@ -16,12 +16,49 @@ type device struct {
 	Name      string `json:"name"`
 	Revoked   bool   `json:"revoked"`
 	TokenHash string `json:"tokenHash,omitempty"`
+	InviteID  string `json:"inviteID,omitempty"`
+}
+
+type invitation struct {
+	Code      string    `json:"code,omitempty"`
+	Remark    string    `json:"remark,omitempty"`
+	DeviceID  string    `json:"deviceID,omitempty"`
+	CreatedAt time.Time `json:"createdAt,omitzero"`
+	Expires   time.Time `json:"expires"`
+}
+
+func (i invitation) available(now time.Time) bool {
+	return i.DeviceID == "" && i.Expires.After(now)
+}
+
+type invitations map[string]invitation
+
+func (i *invitations) UnmarshalJSON(data []byte) error {
+	var records map[string]json.RawMessage
+	if err := json.Unmarshal(data, &records); err != nil {
+		return err
+	}
+	result := make(invitations, len(records))
+	for id, raw := range records {
+		var entry invitation
+		target := any(&entry)
+		if len(raw) > 0 && raw[0] == '"' {
+			// Older databases store only the expiry date under the code's hash.
+			target = &entry.Expires
+		}
+		if err := json.Unmarshal(raw, target); err != nil {
+			return err
+		}
+		result[id] = entry
+	}
+	*i = result
+	return nil
 }
 
 type state struct {
 	Domain  string                    `json:"domain"`
 	Devices map[string]device         `json:"devices"`
-	Invites map[string]time.Time      `json:"invites"`
+	Invites invitations               `json:"invites"`
 	Tunnels map[string]control.Tunnel `json:"tunnels"`
 }
 
@@ -59,7 +96,7 @@ func openStore(path, domain string) (*bolt.DB, state, error) {
 		if raw := bucket.Get(stateKey); raw != nil {
 			return json.Unmarshal(raw, &data)
 		}
-		data = state{domain, map[string]device{}, map[string]time.Time{}, map[string]control.Tunnel{}}
+		data = state{domain, map[string]device{}, invitations{}, map[string]control.Tunnel{}}
 		raw, err := json.Marshal(data)
 		if err != nil {
 			return err
