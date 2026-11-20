@@ -4,9 +4,9 @@ MultiFRP 用一台公网服务器管理多台 Windows 设备的 TCP 隧道。服
 
 ## 部署服务端
 
-1. 在 Linux 公网服务器上准备 Docker Engine 和 Docker Compose v2。把管理域名的 DNS 记录指向这台服务器。若使用单独的公网访问域名，也将其指向这台服务器。
+1. 在 Linux 公网服务器上准备 Docker Engine、Docker Compose v2 和 Nginx。把管理域名的 DNS 记录指向这台服务器。若使用单独的公网访问域名，也将其指向这台服务器。
 2. 将 `.env.example` 复制为 `.env`，填写 `MULTIFRP_HOST` 和 `MULTIFRP_ADMIN_PASSWORD`。管理域名填写裸域名，例如 `manage.example.com`。密码长度至少为 16 字节，可在 `.env` 里用单引号保留 `$` 等字符。公网访问域名留空时使用管理域名，部署后可在网页后台修改。
-3. 在服务器防火墙和云安全组放行 TCP `80`、`443` 和配置的公网隧道端口范围，默认 `30000–30099`。服务端与客户端的管理 API 和 FRP 连接共用 HTTPS `443`，Caddy 为管理域名签发证书。
+3. 按下文配置 Nginx 的 HTTPS 反代。在防火墙和云安全组放行 TCP `443` 和实际使用的公网隧道端口，默认端口池为 `30000–30099`。如果 Nginx 用 `80` 做 HTTP 跳转或证书验证，也放行该端口。
 4. 在项目目录执行：
 
    ```sh
@@ -17,11 +17,37 @@ MultiFRP 用一台公网服务器管理多台 Windows 设备的 TCP 隧道。服
 
 5. 打开 `https://你的管理域名`，使用 `.env` 中的管理员账号登录。默认用户名为 `admin`。
 
-Docker 卷 `server-data` 保存设备授权、端口分配、后台域名和近 8 天的流量样本，`https-data` 保存 Caddy 证书。常规重建复用原卷。扩充端口范围时保留已有分配所在的端口。
+Docker 卷 `server-data` 保存设备授权、端口分配、后台域名和近 8 天的流量样本。常规重建复用原卷。扩充端口范围时保留已有分配所在的端口。
 
 项目使用 `compose.yaml`（Docker Compose 默认识别），服务端直接拉取 `ghcr.io/beipoer/multi-frp:latest`，无需在部署机器上编译。更新时再次执行上面的 `pull` 和 `up -d`。要固定版本，在 `.env` 中设置 `MULTIFRP_IMAGE_TAG=v1.0.0`，对应标签必须已发布。镜像目前支持 Linux x64。
 
 首次发布后，如需免登录拉取，请在 GitHub 仓库关联的 `multi-frp` Package 设置中将可见性改为 Public；若保留私有，则在部署机器上先使用有 `read:packages` 权限的凭据执行 `docker login ghcr.io`。
+
+### 配置 Nginx
+
+在同一台宿主机的 Nginx 上，为 `MULTIFRP_HOST` 配置 HTTPS 站点和受信任的证书。MultiFRP 的 HTTP 监听地址由 `.env` 中的 `MULTIFRP_HTTP_BIND` 控制，默认是 `127.0.0.1:8080`。例如端口 `8080` 已被占用时，可在 `.env` 中设置 `MULTIFRP_HTTP_BIND=127.0.0.1:18080`，执行 `docker compose up -d` 应用，再把 Nginx 中两处 `proxy_pass` 都改为 `http://127.0.0.1:18080`。Compose 健康检查会自动使用新的端口。
+
+把以下 `location` 配置放进该域名监听 `443` 的 `server` 块。管理后台与 EXE 共用 `443`，其中 `/~!frp` 是 EXE 的 WebSocket 接入路径。
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+}
+
+location = /~!frp {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 120s;
+}
+```
+
+Nginx 如果也在 Docker 中运行，需要使用 `host` 网络才能访问上述回环地址。执行 `nginx -t` 检查后重载配置。可在服务器上请求 Nginx 上游地址的 `/healthz`，正常返回 `true`。
+
+从旧的内置 HTTPS 服务迁移时，先准备好 Nginx 站点，再在原项目目录执行 `docker compose up -d --remove-orphans`。Compose 会清理旧版 `https` 容器并继续使用原有的 `server-data` 卷。若旧容器占着 `80` 或 `443`，等它退出后再启动或重载 Nginx。
 
 ## GitHub Actions 发布
 
@@ -69,7 +95,7 @@ EXE 首次获准安装时复制到 `%ProgramFiles%\MultiFRP\MultiFRP.exe`。设�
 
 服务端使用 Linux host 网络，端口池只规定可分配的公网端口范围，不再生成整段 Docker 端口映射。范围可设置为 `30000–40000`，允许范围为 `20000–65535`；只有已批准且启用的隧道才监听公网端口。停用或撤销会关闭监听与现有连接，保留分配记录，重启后恢复已启用的隧道。审批或重新启用时遇到占用会返回明确错误，保持原状态；重启恢复时遇到占用会报错退出，请先释放对应端口。
 
-更新时必须同时更新仓库里的 `compose.yaml` 和 `deploy/Caddyfile`，不能只拉取新镜像。在原项目目录执行（保留 `.env` 和原有命名卷）：
+更新时同时更新仓库里的 `compose.yaml` 和服务端镜像。在保留 `.env` 和原有命名卷的前提下，在原项目目录执行：
 
 ```sh
 git pull --ff-only
@@ -78,6 +104,6 @@ docker compose up -d --remove-orphans
 docker compose ps
 ```
 
-切换期间已有隧道会短暂断开。不要执行 `docker compose down -v`，以免删除授权与历史数据。云安全组及宿主机防火墙仍需放行 TCP 80、443 和实际使用的隧道端口；host 网络下须检查宿主机防火墙规则。
+切换期间已有隧道会短暂断开。保留 `server-data` 卷即可保留授权和历史数据。检查云安全组及宿主机防火墙已放行 HTTPS 和实际使用的隧道端口。
 
-管理 API 默认只监听 `127.0.0.1:8080`，Caddy 在同一宿主机通过该地址反向代理；FRP 控制端口 7000、状态端口 7500 和内部转发端口 12000–19999 也仅监听回环地址。请避免其他服务占用这些端口以及 Caddy 的 80/443。内部转发端口按需分配，与公网端口池互不重叠；每条启用过的隧道在本次服务运行期间保留一个内部端口编号，最多 8000 个，实际可用数取决于宿主机占用情况。预留编号不会创建监听，FRP 仅在客户端上线时监听内部端口。
+管理 API 由同一宿主机上的 Nginx 转发，后端监听地址见 `MULTIFRP_HTTP_BIND`。FRP 控制端口 7000、状态端口 7500 和内部转发端口 12000–19999 仅监听回环地址。内部转发端口按需分配，与公网端口池互不重叠。每条启用过的隧道在本次服务运行期间保留一个内部端口编号，最多 8000 个，实际可用数取决于宿主机占用情况。预留编号不会创建监听，FRP 仅在客户端上线时监听内部端口。
